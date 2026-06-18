@@ -16,7 +16,6 @@ from collections import Counter
 from datetime import datetime
 
 try:
-    from scapy.all import ARP, DNS, ICMP, IP, TCP, UDP, Ether
     from scapy.error import Scapy_Exception
 except ImportError:
     print("Error: scapy is not installed. Run: pip install -r requirements.txt")
@@ -24,9 +23,6 @@ except ImportError:
 
 from capture import create_backend, list_interfaces, save_capture
 from packet_analyzer import PacketAnalyzer
-
-
-PROTOCOL_NAMES = {1: "ICMP", 6: "TCP", 17: "UDP"}
 
 
 class PacketSniffer:
@@ -42,6 +38,9 @@ class PacketSniffer:
         output_file: str | None = None,
         verbose: bool = False,
         analyze: bool = False,
+        show_payload: bool = True,
+        show_hex: bool = False,
+        max_payload: int = 128,
     ) -> None:
         self.backend_name = backend
         self.interface = interface
@@ -51,9 +50,11 @@ class PacketSniffer:
         self.output_file = output_file
         self.verbose = verbose
         self.analyze = analyze
+        self.show_payload = show_payload
+        self.show_hex = show_hex
         self.captured_packets: list = []
         self.stats: Counter = Counter()
-        self.analyzer = PacketAnalyzer()
+        self.analyzer = PacketAnalyzer(max_payload_bytes=max_payload)
         self.capture = create_backend(
             backend,
             interface=interface,
@@ -62,69 +63,28 @@ class PacketSniffer:
             timeout=timeout,
         )
 
-    def _protocol_name(self, packet) -> str:
-        if packet.haslayer(TCP):
-            return "TCP"
-        if packet.haslayer(UDP):
-            return "UDP"
-        if packet.haslayer(ICMP):
-            return "ICMP"
-        if packet.haslayer(ARP):
-            return "ARP"
-        if packet.haslayer(IP):
-            proto = packet[IP].proto
-            return PROTOCOL_NAMES.get(proto, f"IP-{proto}")
-        if packet.haslayer(Ether):
-            return f"Ether-{packet[Ether].type}"
-        return "Unknown"
-
-    def _format_endpoints(self, packet) -> tuple[str, str, str]:
-        src = dst = info = "-"
-
-        if packet.haslayer(IP):
-            src = packet[IP].src
-            dst = packet[IP].dst
-
-        if packet.haslayer(TCP):
-            src = f"{src}:{packet[TCP].sport}"
-            dst = f"{dst}:{packet[TCP].dport}"
-            flags = packet[TCP].sprintf("%TCP.flags%")
-            info = f"flags={flags} seq={packet[TCP].seq}"
-        elif packet.haslayer(UDP):
-            src = f"{src}:{packet[UDP].sport}"
-            dst = f"{dst}:{packet[UDP].dport}"
-            info = f"len={len(packet[UDP].payload)}"
-        elif packet.haslayer(ICMP):
-            info = f"type={packet[ICMP].type} code={packet[ICMP].code}"
-        elif packet.haslayer(ARP):
-            src = packet[ARP].psrc
-            dst = packet[ARP].pdst
-            op = "request" if packet[ARP].op == 1 else "reply"
-            info = f"who-has {packet[ARP].pdst} ({op})"
-        elif packet.haslayer(DNS) and packet.haslayer(UDP):
-            qname = packet[DNS].qd.qname.decode(errors="replace") if packet[DNS].qd else "?"
-            info = f"query={qname.rstrip('.')}"
-
-        return src, dst, info
-
     def _print_packet(self, packet, index: int) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        protocol = self._protocol_name(packet)
-        src, dst, info = self._format_endpoints(packet)
-        length = len(packet)
-
+        protocol = self.analyzer.protocol_name(packet)
         self.stats[protocol] += 1
 
-        line = f"[{index:>5}] {timestamp} | {protocol:<6} | {length:>5} B | {src:<22} -> {dst:<22}"
-        if info != "-":
-            line += f" | {info}"
-        print(line)
-
         if self.analyze:
+            print(self.analyzer.format_capture_block(
+                packet, index, timestamp, self.show_payload, self.show_hex,
+            ))
             print()
             self.analyzer.print_analysis(packet, index)
         elif self.verbose:
+            print(self.analyzer.format_capture_block(
+                packet, index, timestamp, self.show_payload, self.show_hex,
+            ))
             packet.show()
+        else:
+            print(self.analyzer.format_capture_block(
+                packet, index, timestamp, self.show_payload, self.show_hex,
+            ))
+
+        print()
 
     def _on_packet(self, packet) -> None:
         index = len(self.captured_packets) + 1
@@ -132,29 +92,30 @@ class PacketSniffer:
         self._print_packet(packet, index)
 
     def _print_banner(self) -> None:
-        print("=" * 72)
+        print("=" * 78)
         print(" Basic Network Sniffer")
-        print("=" * 72)
+        print("=" * 78)
         print(f" Backend   : {self.backend_name}")
         print(f" Interface : {self.capture.interface_label}")
         print(f" Filter    : {self.packet_filter or '(none)'}")
         print(f" Count     : {self.count if self.count else 'unlimited'}")
         print(f" Timeout   : {self.timeout if self.timeout else 'none'}")
+        print(f" Payloads  : {'on' if self.show_payload else 'off'}")
         if self.backend_name == "socket" and self.packet_filter:
             print(" Note      : socket backend supports basic filters (ip/tcp/udp/icmp)")
-        print("=" * 72)
-        print(f" {'#':>5}  {'Time':<12} | {'Proto':<6} | {'Size':>5}   | {'Source':<22} -> {'Destination'}")
-        print("-" * 72)
+        print("=" * 78)
+        print(" Fields shown: source/destination IP, protocol, ports, and payload preview")
+        print("-" * 78)
 
     def _print_summary(self) -> None:
         total = len(self.captured_packets)
-        print("-" * 72)
+        print("-" * 78)
         print(f"Captured {total} packet(s).")
         if self.stats:
             print("Protocol breakdown:")
             for proto, count in self.stats.most_common():
                 print(f"  {proto:<8} {count}")
-        if self.captured_packets and self.analyze:
+        if self.captured_packets:
             print(self.analyzer.summary(self.captured_packets))
 
     def start(self) -> None:
@@ -196,6 +157,7 @@ Examples:
   python sniffer.py --backend socket -c 10
   python sniffer.py -f "tcp port 80" -o capture.pcap
   python sniffer.py -c 5 --analyze
+  python sniffer.py --no-payload
   python sniffer.py --list-interfaces
   python packet_analyzer.py capture.pcap
         """,
@@ -235,12 +197,28 @@ Examples:
     parser.add_argument(
         "-v", "--verbose",
         action="store_true",
-        help="Show full packet layer details (scapy format)",
+        help="Show scapy layer breakdown in addition to packet summary",
     )
     parser.add_argument(
         "-a", "--analyze",
         action="store_true",
-        help="Analyze each packet's structure, headers, and payload content",
+        help="Show full structure analysis with hex dump for each packet",
+    )
+    parser.add_argument(
+        "--no-payload",
+        action="store_true",
+        help="Hide payload preview in output",
+    )
+    parser.add_argument(
+        "--payload-hex",
+        action="store_true",
+        help="Include a short hex preview of each payload",
+    )
+    parser.add_argument(
+        "--max-payload",
+        type=int,
+        default=128,
+        help="Max payload bytes used for previews and analysis (default: 128)",
     )
     parser.add_argument(
         "--list-interfaces",
@@ -266,6 +244,9 @@ def main() -> None:
         output_file=args.output_file,
         verbose=args.verbose,
         analyze=args.analyze,
+        show_payload=not args.no_payload,
+        show_hex=args.payload_hex,
+        max_payload=args.max_payload,
     )
     sniffer.start()
 
