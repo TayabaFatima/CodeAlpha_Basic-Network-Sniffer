@@ -2,7 +2,9 @@
 """
 Basic Network Sniffer — captures and displays live network traffic.
 
-Requires administrator/root privileges and Npcap (Windows) or libpcap (Linux/macOS).
+Uses scapy or the standard-library socket module for packet capture.
+Requires administrator/root privileges and Npcap (Windows) or libpcap (Linux/macOS)
+when using the scapy backend.
 """
 
 from __future__ import annotations
@@ -14,24 +16,13 @@ from collections import Counter
 from datetime import datetime
 
 try:
-    from scapy.all import (
-        ARP,
-        DNS,
-        ICMP,
-        IP,
-        TCP,
-        UDP,
-        Ether,
-        conf,
-        get_if_list,
-        sniff,
-        wrpcap,
-    )
+    from scapy.all import ARP, DNS, ICMP, IP, TCP, UDP, Ether
     from scapy.error import Scapy_Exception
 except ImportError:
     print("Error: scapy is not installed. Run: pip install -r requirements.txt")
     sys.exit(1)
 
+from capture import create_backend, list_interfaces, save_capture
 from packet_analyzer import PacketAnalyzer
 
 
@@ -43,6 +34,7 @@ class PacketSniffer:
 
     def __init__(
         self,
+        backend: str = "scapy",
         interface: str | None = None,
         packet_filter: str | None = None,
         count: int = 0,
@@ -51,6 +43,7 @@ class PacketSniffer:
         verbose: bool = False,
         analyze: bool = False,
     ) -> None:
+        self.backend_name = backend
         self.interface = interface
         self.packet_filter = packet_filter
         self.count = count
@@ -61,6 +54,13 @@ class PacketSniffer:
         self.captured_packets: list = []
         self.stats: Counter = Counter()
         self.analyzer = PacketAnalyzer()
+        self.capture = create_backend(
+            backend,
+            interface=interface,
+            packet_filter=packet_filter,
+            count=count,
+            timeout=timeout,
+        )
 
     def _protocol_name(self, packet) -> str:
         if packet.haslayer(TCP):
@@ -132,14 +132,16 @@ class PacketSniffer:
         self._print_packet(packet, index)
 
     def _print_banner(self) -> None:
-        iface = self.interface or conf.iface
         print("=" * 72)
         print(" Basic Network Sniffer")
         print("=" * 72)
-        print(f" Interface : {iface}")
+        print(f" Backend   : {self.backend_name}")
+        print(f" Interface : {self.capture.interface_label}")
         print(f" Filter    : {self.packet_filter or '(none)'}")
         print(f" Count     : {self.count if self.count else 'unlimited'}")
         print(f" Timeout   : {self.timeout if self.timeout else 'none'}")
+        if self.backend_name == "socket" and self.packet_filter:
+            print(" Note      : socket backend supports basic filters (ip/tcp/udp/icmp)")
         print("=" * 72)
         print(f" {'#':>5}  {'Time':<12} | {'Proto':<6} | {'Size':>5}   | {'Source':<22} -> {'Destination'}")
         print("-" * 72)
@@ -160,37 +162,27 @@ class PacketSniffer:
         print("Listening... Press Ctrl+C to stop.\n")
 
         try:
-            packets = sniff(
-                iface=self.interface,
-                filter=self.packet_filter,
-                prn=self._on_packet,
-                store=True,
-                count=self.count or 0,
-                timeout=self.timeout,
-            )
+            packets = self.capture.capture(self._on_packet)
             if not self.captured_packets and packets:
                 self.captured_packets = list(packets)
         except PermissionError:
             print("\nError: Permission denied. Run this program as administrator/root.")
             sys.exit(1)
+        except OSError as exc:
+            print(f"\nError: {exc}")
+            sys.exit(1)
         except Scapy_Exception as exc:
             print(f"\nError: {exc}")
             if platform.system() == "Windows":
-                print("On Windows, install Npcap from https://npcap.com/")
+                print("On Windows with scapy, install Npcap from https://npcap.com/")
             sys.exit(1)
         except KeyboardInterrupt:
             print("\n\nCapture stopped by user.")
         finally:
             if self.output_file and self.captured_packets:
-                wrpcap(self.output_file, self.captured_packets)
+                save_capture(self.output_file, self.captured_packets)
                 print(f"Saved {len(self.captured_packets)} packet(s) to {self.output_file}")
             self._print_summary()
-
-
-def list_interfaces() -> None:
-    print("Available network interfaces:")
-    for name in get_if_list():
-        print(f"  - {name}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -200,12 +192,19 @@ def parse_args() -> argparse.Namespace:
         epilog="""
 Examples:
   python sniffer.py
-  python sniffer.py -i "Ethernet" -c 20
+  python sniffer.py --backend scapy -i "Ethernet" -c 20
+  python sniffer.py --backend socket -c 10
   python sniffer.py -f "tcp port 80" -o capture.pcap
   python sniffer.py -c 5 --analyze
   python sniffer.py --list-interfaces
   python packet_analyzer.py capture.pcap
         """,
+    )
+    parser.add_argument(
+        "-b", "--backend",
+        choices=["scapy", "socket"],
+        default="scapy",
+        help="Capture library: scapy (default) or socket (stdlib raw sockets)",
     )
     parser.add_argument(
         "-i", "--interface",
@@ -214,7 +213,7 @@ Examples:
     parser.add_argument(
         "-f", "--filter",
         dest="packet_filter",
-        help='BPF filter expression (e.g. "tcp", "udp port 53", "host 192.168.1.1")',
+        help='BPF filter (scapy) or basic filter ip/tcp/udp/icmp (socket)',
     )
     parser.add_argument(
         "-c", "--count",
@@ -259,6 +258,7 @@ def main() -> None:
         return
 
     sniffer = PacketSniffer(
+        backend=args.backend,
         interface=args.interface,
         packet_filter=args.packet_filter,
         count=args.count,
@@ -272,5 +272,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-   
