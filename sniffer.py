@@ -3,8 +3,8 @@
 Basic Network Sniffer — captures and displays live network traffic.
 
 Uses scapy or the standard-library socket module for packet capture.
-Requires administrator/root privileges and Npcap (Windows) or libpcap (Linux/macOS)
-when using the scapy backend.
+Requires administrator/root privileges. On Windows, install Npcap for full Layer 2
+capture, or use the built-in Layer 3 / socket fallbacks when Npcap is missing.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ except ImportError:
     print("Error: scapy is not installed. Run: pip install -r requirements.txt")
     sys.exit(1)
 
-from capture import create_backend, list_interfaces, save_capture
+from capture import create_backend, list_interfaces, npcap_install_hint, save_capture
 from packet_analyzer import PacketAnalyzer
 
 
@@ -96,6 +96,7 @@ class PacketSniffer:
         print(" Basic Network Sniffer")
         print("=" * 78)
         print(f" Backend   : {self.backend_name}")
+        print(f" Mode      : {self.capture.capture_mode}")
         print(f" Interface : {self.capture.interface_label}")
         print(f" Filter    : {self.packet_filter or '(none)'}")
         print(f" Count     : {self.count if self.count else 'unlimited'}")
@@ -132,10 +133,15 @@ class PacketSniffer:
         except OSError as exc:
             print(f"\nError: {exc}")
             sys.exit(1)
+        except RuntimeError as exc:
+            print(f"\nError: {exc}")
+            if platform.system() == "Windows":
+                print(npcap_install_hint())
+            sys.exit(1)
         except Scapy_Exception as exc:
             print(f"\nError: {exc}")
             if platform.system() == "Windows":
-                print("On Windows with scapy, install Npcap from https://npcap.com/")
+                print(npcap_install_hint())
             sys.exit(1)
         except KeyboardInterrupt:
             print("\n\nCapture stopped by user.")
