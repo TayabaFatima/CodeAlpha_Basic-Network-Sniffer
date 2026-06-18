@@ -26,6 +26,7 @@ class CaptureBackend(ABC):
     """Common interface for live packet capture."""
 
     name: str = "base"
+    capture_mode: str = "unknown"
 
     def __init__(
         self,
@@ -52,15 +53,49 @@ class CaptureBackend(ABC):
         return "default"
 
 
+def npcap_available() -> bool:
+    """Return True when Layer 2 capture via Npcap/libpcap is available."""
+    if conf is None:
+        return False
+    if not getattr(conf, "use_pcap", False):
+        return False
+    if platform.system() == "Windows":
+        return bool(getattr(conf, "use_npcap", False))
+    return True
+
+
+def npcap_install_hint() -> str:
+    return (
+        "Install Npcap (recommended): https://npcap.com/\n"
+        "  - Run the installer as Administrator\n"
+        "  - Enable 'WinPcap API-compatible Mode'\n"
+        "  - Restart your terminal after installing\n"
+        "Alternatives without Npcap:\n"
+        "  - python sniffer.py --backend scapy   (auto Layer 3 fallback)\n"
+        "  - python sniffer.py --backend socket    (Windows raw IP socket)"
+    )
+
+
 class ScapyCapture(CaptureBackend):
     """Capture packets with scapy.sniff() — full protocol parsing and BPF filters."""
 
     name = "scapy"
 
-    def capture(self, on_packet: PacketCallback) -> list:
-        if sniff is None:
-            raise ImportError("scapy is not installed. Run: pip install -r requirements.txt")
+    def __init__(self, *args, l3_fallback: bool = True, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.l3_fallback = l3_fallback
+        if npcap_available():
+            self.capture_mode = "Layer 2 (Ethernet via Npcap/libpcap)"
+        else:
+            self.capture_mode = "Layer 3 (IP via scapy L3socket)"
 
+    @staticmethod
+    def _layer2_unavailable(exc: BaseException) -> bool:
+        message = str(exc).lower()
+        return "winpcap" in message or "layer 2" in message or "libpcap" in message
+
+    def _sniff_l2(self, on_packet: PacketCallback) -> list:
+        self.capture_mode = "Layer 2 (Ethernet via Npcap/libpcap)"
         packets = sniff(
             iface=self.interface,
             filter=self.packet_filter,
@@ -70,6 +105,61 @@ class ScapyCapture(CaptureBackend):
             timeout=self.timeout,
         )
         return list(packets) if packets else []
+
+    def _sniff_l3(self, on_packet: PacketCallback) -> list:
+        if conf is None or sniff is None:
+            raise ImportError("scapy is not installed. Run: pip install -r requirements.txt")
+
+        conf.use_pcap = False
+        self.capture_mode = "Layer 3 (IP via scapy L3socket)"
+
+        l3_kwargs: dict = {}
+        if self.interface:
+            l3_kwargs["iface"] = self.interface
+        if self.packet_filter:
+            l3_kwargs["filter"] = self.packet_filter
+
+        sock = conf.L3socket(**l3_kwargs)
+        try:
+            packets = sniff(
+                opened_socket=sock,
+                prn=on_packet,
+                store=True,
+                count=self.count or 0,
+                timeout=self.timeout,
+            )
+            return list(packets) if packets else []
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def capture(self, on_packet: PacketCallback) -> list:
+        if sniff is None:
+            raise ImportError("scapy is not installed. Run: pip install -r requirements.txt")
+
+        if not npcap_available():
+            print(
+                "Warning: Npcap/WinPcap not detected. Using Layer 3 capture (IP packets only).\n"
+                + npcap_install_hint()
+                + "\n"
+            )
+            return self._sniff_l3(on_packet)
+
+        try:
+            return self._sniff_l2(on_packet)
+        except RuntimeError as exc:
+            if self.l3_fallback and self._layer2_unavailable(exc):
+                print(
+                    "\nWarning: Layer 2 capture failed. Falling back to Layer 3 (IP only).\n"
+                    + npcap_install_hint()
+                    + "\n"
+                )
+                return self._sniff_l3(on_packet)
+            raise RuntimeError(
+                f"{exc}\n\n{npcap_install_hint()}"
+            ) from exc
 
 
 class SocketCapture(CaptureBackend):
@@ -87,6 +177,12 @@ class SocketCapture(CaptureBackend):
         super().__init__(*args, **kwargs)
         self._system = platform.system()
         self._ip_only = self._system == "Windows"
+        if self._system == "Windows":
+            self.capture_mode = "Layer 3 (Windows raw IP socket)"
+        elif self._system == "Linux":
+            self.capture_mode = "Layer 2 (Linux AF_PACKET)"
+        else:
+            self.capture_mode = "Layer 3 (raw socket)"
 
     def _open_socket(self) -> socket.socket:
         if self._system == "Linux":
