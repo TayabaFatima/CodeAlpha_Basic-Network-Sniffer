@@ -32,6 +32,8 @@ except ImportError:
     print("Error: scapy is not installed. Run: pip install -r requirements.txt")
     sys.exit(1)
 
+from packet_analyzer import PacketAnalyzer
+
 
 PROTOCOL_NAMES = {1: "ICMP", 6: "TCP", 17: "UDP"}
 
@@ -47,6 +49,7 @@ class PacketSniffer:
         timeout: int | None = None,
         output_file: str | None = None,
         verbose: bool = False,
+        analyze: bool = False,
     ) -> None:
         self.interface = interface
         self.packet_filter = packet_filter
@@ -54,8 +57,10 @@ class PacketSniffer:
         self.timeout = timeout
         self.output_file = output_file
         self.verbose = verbose
+        self.analyze = analyze
         self.captured_packets: list = []
         self.stats: Counter = Counter()
+        self.analyzer = PacketAnalyzer()
 
     def _protocol_name(self, packet) -> str:
         if packet.haslayer(TCP):
@@ -115,7 +120,10 @@ class PacketSniffer:
             line += f" | {info}"
         print(line)
 
-        if self.verbose:
+        if self.analyze:
+            print()
+            self.analyzer.print_analysis(packet, index)
+        elif self.verbose:
             packet.show()
 
     def _on_packet(self, packet) -> None:
@@ -144,6 +152,8 @@ class PacketSniffer:
             print("Protocol breakdown:")
             for proto, count in self.stats.most_common():
                 print(f"  {proto:<8} {count}")
+        if self.captured_packets and self.analyze:
+            print(self.analyzer.summary(self.captured_packets))
 
     def start(self) -> None:
         self._print_banner()
@@ -192,7 +202,9 @@ Examples:
   python sniffer.py
   python sniffer.py -i "Ethernet" -c 20
   python sniffer.py -f "tcp port 80" -o capture.pcap
+  python sniffer.py -c 5 --analyze
   python sniffer.py --list-interfaces
+  python packet_analyzer.py capture.pcap
         """,
     )
     parser.add_argument(
@@ -224,7 +236,12 @@ Examples:
     parser.add_argument(
         "-v", "--verbose",
         action="store_true",
-        help="Show full packet layer details",
+        help="Show full packet layer details (scapy format)",
+    )
+    parser.add_argument(
+        "-a", "--analyze",
+        action="store_true",
+        help="Analyze each packet's structure, headers, and payload content",
     )
     parser.add_argument(
         "--list-interfaces",
@@ -248,9 +265,12 @@ def main() -> None:
         timeout=args.timeout,
         output_file=args.output_file,
         verbose=args.verbose,
+        analyze=args.analyze,
     )
     sniffer.start()
 
 
 if __name__ == "__main__":
     main()
+
+   
